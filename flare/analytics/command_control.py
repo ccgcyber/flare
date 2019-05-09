@@ -23,6 +23,9 @@ from flare.tools.whoisip import WhoisLookup
 import time
 import warnings
 import os
+import datetime
+import json
+
 warnings.filterwarnings('ignore')
 
 config_default = os.path.join(os.path.dirname(__file__), '..', '..', 'configs/elasticsearch.ini')
@@ -89,6 +92,7 @@ class elasticBeacon(object):
                 self.beacon_timestamp = self.config.get('beacon', 'field_timestamp')
                 self.beacon_flow_bytes_toserver = self.config.get('beacon', 'field_flow_bytes_toserver')
                 self.beacon_flow_id = self.config.get('beacon', 'field_flow_id')
+                self.beacon_event_type = self.config.get('beacon','event_type')
                 self.verbose = self.config.config.getboolean('beacon', 'verbose')
                 self.auth_user = self.config.config.get('beacon','username')
                 self.auth_password = self.config.config.get('beacon', 'password')
@@ -121,6 +125,7 @@ class elasticBeacon(object):
             self.beacon_timestamp = '@timestamp'
             self.beacon_flow_bytes_toserver = 'bytes_toserver'
             self.beacon_flow_id = 'flow_id'
+            self.beacon_event_type = 'flow'
             self.verbose = verbose
             self.suricata_defaults = False
 
@@ -134,10 +139,17 @@ class elasticBeacon(object):
         self.fields = [self.beacon_src_ip, self.beacon_dest_ip, self.beacon_destination_port, 'bytes_toserver', 'dest_degree', 'occurrences', 'percent', 'interval']
 
         try:
+            _ = (self.auth_user, self.auth_password)
+        except AttributeError as e:
+            self.auth = None
+
+        try:
             self.vprint('{info}[INFO]{endc} Attempting to connect to elasticsearch...'.format(info=bcolors.OKBLUE,
                                                                                         endc=bcolors.ENDC))
-
-            self.es = Elasticsearch(self.es_host, port=self.es_port, timeout=self.es_timeout, http_auth=(self.auth_user, self.auth_password), verify_certs=False)
+            if self.auth == None:
+                self.es = Elasticsearch(self.es_host, port=self.es_port, timeout=self.es_timeout, verify_certs=False)
+            else:
+                self.es = Elasticsearch(self.es_host, port=self.es_port, timeout=self.es_timeout, http_auth=(self.auth_user, self.auth_password), verify_certs=False)
             self.vprint('{green}[SUCCESS]{endc} Connected to elasticsearch on {host}:{port}'.format(green=bcolors.OKGREEN, endc=bcolors.ENDC, host=self.es_host, port=str(self.es_port)))
         except Exception as e:
             self.vprint(e)
@@ -191,7 +203,7 @@ class elasticBeacon(object):
                                 "must": [
                                     {
                                         "range": {
-                                            "timestamp": {
+                                            self.beacon_timestamp: {
                                                 "gte": gte,
                                                 "lte": lte,
                                                 "format": "epoch_millis"
@@ -202,7 +214,7 @@ class elasticBeacon(object):
                                 "must_not": []
                             }
                         },
-                            {"term": {"event_type": "flow"}}
+                            {"term": {"event_type": self.beacon_event_type}}
                         ]
                     }
                 }
@@ -286,9 +298,9 @@ class elasticBeacon(object):
         if 'flow' in df.columns:
             df[self.beacon_flow_bytes_toserver] = df['flow'].apply(lambda x: x.get(self.beacon_flow_bytes_toserver))
 
-            df['triad_id'] = (df[self.beacon_src_ip] + df[self.beacon_dest_ip] + df[self.beacon_destination_port].astype(str)).apply(hash)
-            df['triad_freq'] = df.groupby('triad_id')['triad_id'].transform('count').fillna(0).astype(int)
-            self.high_freq = list(df[df.triad_freq > self.MIN_OCCURRENCES].groupby('triad_id').groups.keys())
+        df['triad_id'] = (df[self.beacon_src_ip] + df[self.beacon_dest_ip] + df[self.beacon_destination_port].astype(str)).apply(hash)
+        df['triad_freq'] = df.groupby('triad_id')['triad_id'].transform('count').fillna(0).astype(int)
+        self.high_freq = list(df[df.triad_freq > self.MIN_OCCURRENCES].groupby('triad_id').groups.keys())
         return df
 
     def find_beacon(self, q_job, beacon_list):
@@ -310,7 +322,7 @@ class elasticBeacon(object):
                 if key < self.min_interval:
                     del d[key]
             
-            # Finding the total numnber of events
+            # Finding the total number of events
             total = sum(d.values())
             
             if d and total > self.MIN_OCCURRENCES:
@@ -330,7 +342,7 @@ class elasticBeacon(object):
             
             q_job.task_done()
 
-    def find_beacons(self, group=True, focus_outbound=False, whois=True, csv_out=None, html_out=None):
+    def find_beacons(self, group=True, focus_outbound=False, whois=True, csv_out=None, html_out=None, json_out=None):
 
         for triad_id in self.high_freq:
             self.q_job.put(triad_id)
@@ -370,8 +382,8 @@ class elasticBeacon(object):
         if group:
             self.vprint('{info} Grouping by destination group IP'.format(info=self.info))
 
-        if whois:
-            self.fields.insert(self.fields.index(self.beacon_dest_ip), 'dest_whois')
+            if whois:
+                self.fields.insert(self.fields.index(self.beacon_dest_ip), 'dest_whois')
             beacon_df = pd.DataFrame(beacon_df.groupby(self.fields).size())
             beacon_df.drop(0, axis=1, inplace=True)
 
@@ -382,5 +394,17 @@ class elasticBeacon(object):
         if html_out:
             self.vprint('{success} Writing html file to {html_out}'.format(html_out=html_out, success=self.success))
             beacon_df.to_html(html_out)
+
+        if json_out:
+            self.vprint('{success} Writing json file to {json_out}'.format(json_out=json_out, success=self.success))
+            now = datetime.datetime.now().isoformat()
+            beacon_df['timestamp'] = now
+            beacon_df['period'] = self.period
+            beacon_df['event_type'] = "beaconing"
+            beacons = beacon_df.to_dict(orient="records")
+
+            with open(json_out, 'a') as out_file:
+                for beacon in beacons:
+                    out_file.write(json.dumps(beacon) + '\n')
 
         return beacon_df

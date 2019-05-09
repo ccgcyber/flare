@@ -47,14 +47,18 @@ beacons = eb.find_beacons(group=True, focus_outbound=True)
 Also available in commandline:
 
 ```bash
+CSV OUTPUT
 flare_beacon --whois --focus_outbound -mo=100 --csv_out=beacon_results.csv
 
-or
-
+HTML OUTPUT
 flare_beacon --group --whois --focus_outbound -c configs/elasticsearch.ini -html beacons.html
+
+JSON OUTPUT (for SIEM)
+flare_beacon --whois --focus_outbound -c /opt/flare-master/configs/selks4.ini -json beacon.json -v
 
 ```
 
+Full writeup [here](http://www.austintaylor.io/detect/beaconing/intrusion/detection/system/command/control/flare/elastic/stack/2017/06/10/detect-beaconing-with-flare-elasticsearch-and-intrusion-detection-systems/)
 
 Domain Features
 ===============
